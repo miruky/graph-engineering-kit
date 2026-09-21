@@ -6,6 +6,39 @@ from test_core import ProjectCase
 
 
 class GraphWorkflow(ProjectCase):
+    def pending_retry_fixture(self, *, with_reader):
+        atomic_write(self.root, "decision.txt", b"bad")
+        code = ("from pathlib import Path\n"
+                "p=Path('attempt.txt');n=int(p.read_text())+1 if p.exists() else 1;p.write_text(str(n))\n"
+                "Path('decision.txt').write_text('partial' if n==1 else 'fixed')\n"
+                "raise SystemExit(1 if n==1 else 0)\n")
+        first = self.n("check", "raise SystemExit(1)", inputs=["decision.txt"])
+        repair = self.n("repair", code, ["check"] if with_reader else [], "any_failed" if with_reader else "all_succeeded",
+                        outputs=["decision.txt", "attempt.txt"], retryable=True, max_attempts=2)
+        self.minimal(([first] if with_reader else []) + [repair], ["repair"])
+        original_save = engine._save
+        def stop_between_attempts(root, state):
+            original_save(root, state)
+            record = state["nodes"]["repair"]
+            if state["status"] == "running" and record["status"] == "pending" and record["history"]:
+                raise KeyboardInterrupt
+        with patch("agentkit.engine._save", side_effect=stop_between_attempts):
+            with self.assertRaises(KeyboardInterrupt):
+                engine.run(self.root)
+        saved = engine.status(self.root)
+        self.assertEqual(saved["nodes"]["repair"]["status"], "pending")
+        self.assertEqual(saved["nodes"]["repair"]["attempts"], 1)
+    def test_completed_failed_attempt_pending_retry_is_a_recorded_file_version(self):
+        self.pending_retry_fixture(with_reader=True)
+        done = engine.run(self.root, resume=True)
+        self.assertEqual(done["status"], "completed")
+        self.assertEqual((self.root / "attempt.txt").read_text(), "2")
+        self.assertEqual(engine.run(self.root, resume=True), done)
+    def test_external_pending_retry_output_edit_is_rejected_before_another_attempt(self):
+        self.pending_retry_fixture(with_reader=False)
+        atomic_write(self.root, "decision.txt", b"external")
+        self.assertCode("STALE_INPUTS", lambda: engine.run(self.root, resume=True, retry_interrupted=True))
+        self.assertEqual((self.root / "attempt.txt").read_text(), "1")
     def test_recorded_partial_write_can_be_handled_without_erasing_failure_history(self):
         atomic_write(self.root, "decision.txt", b"bad")
         first = self.n("check", "raise SystemExit(1)", inputs=["decision.txt"])
@@ -98,6 +131,19 @@ class GraphWorkflow(ProjectCase):
         atomic_write(self.root, "readonly.txt", b"external")
         self.assertCode("STALE_INPUTS", lambda: engine.run(self.root, resume=True, retry_interrupted=True))
         atomic_write(self.root, "readonly.txt", b"fixed")
+        original_configuration = engine.configuration
+        calls = 0
+        def interrupt_before_retry_launch(root):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise KeyboardInterrupt
+            return original_configuration(root)
+        with patch("agentkit.engine.configuration", side_effect=interrupt_before_retry_launch):
+            with self.assertRaises(KeyboardInterrupt):
+                engine.run(self.root, resume=True, retry_interrupted=True)
+        self.assertTrue(engine.status(self.root)["nodes"]["repair"]["interrupted_retry"])
+        self.assertCode("RETRY_CONFIRMATION", lambda: engine.run(self.root, resume=True))
         done = engine.run(self.root, resume=True, retry_interrupted=True)
         self.assertEqual(done["status"], "completed")
         self.assertEqual((self.root / "attempt.txt").read_text(), "2")

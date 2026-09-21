@@ -41,6 +41,15 @@ def _topology(nodes):
     return order, ancestors
 
 
+def _recorded_execution(record):
+    history = record.get("history", [])
+    return bool(history and record.get("receipt") == history[-1].get("receipt"))
+
+
+def _unfinished_attempt(record):
+    return record["status"] == "running" or record["status"] == "pending" and record.get("interrupted_retry") is True
+
+
 def configuration(root):
     cfg = load_json(root, CONFIG)
     object_fields(cfg, ["schema_version", "max_seconds", "parallelism", "protected_inputs", "success_nodes", "nodes"])
@@ -127,9 +136,11 @@ def _validate_saved(root, cfg, state, *, retry_interrupted=False):
     order, ancestors = _topology(nodes)
     output_patterns = {key: [_glob_regex(p) for p in node["outputs"]] for key, node in nodes.items()}
     for key, record in state["nodes"].items():
-        if record["status"] == "running":
+        if _unfinished_attempt(record):
             require(retry_interrupted and nodes[key]["retryable"],
                     "Interrupted node may have side effects; inspection and --retry-interrupted are required", "RETRY_CONFIRMATION")
+        elif record["status"] == "pending" and record.get("history"):
+            require(_recorded_execution(record), "Pending retry lacks completed attempt evidence", "INVALID_STATE")
 
     def current_expected(node, field, saved):
         """Advance historical file versions through declared, ordered later writes."""
@@ -139,13 +150,11 @@ def _validate_saved(root, cfg, state, *, retry_interrupted=False):
             if node["id"] not in ancestors[key] or nodes[key]["kind"] == "approval":
                 continue
             successor = state["nodes"][key]
-            history = successor.get("history", [])
-            recorded_execution = bool(history and successor.get("receipt") == history[-1].get("receipt"))
-            if successor["status"] in ("succeeded", "failed") and recorded_execution:
+            if successor["status"] in ("succeeded", "failed", "pending") and not _unfinished_attempt(successor) and _recorded_execution(successor):
                 require(isinstance(successor.get("outputs"), dict),
                         "A terminal writer lacks output evidence; start a new run", "INVALID_STATE")
                 written = successor["outputs"]
-            elif successor["status"] == "running" and retry_interrupted and nodes[key]["retryable"]:
+            elif _unfinished_attempt(successor) and retry_interrupted and nodes[key]["retryable"]:
                 # This explicit operator option accepts inspection/retry of partial writes.
                 written = snapshot(root, nodes[key]["outputs"], required=False)
             else:
@@ -158,7 +167,9 @@ def _validate_saved(root, cfg, state, *, retry_interrupted=False):
 
     for node in cfg["nodes"]:
         record = state["nodes"][node["id"]]
-        if record["status"] in ("succeeded", "failed") and node["kind"] != "approval":
+        completed_attempt = record["status"] in ("succeeded", "failed") or (
+            record["status"] == "pending" and not _unfinished_attempt(record) and _recorded_execution(record))
+        if completed_attempt and node["kind"] != "approval":
             require(isinstance(record.get("inputs"), dict) and isinstance(record.get("outputs"), dict),
                     "A terminal node lacks input/output evidence; start a new run", "INVALID_STATE")
             strict = record["status"] == "succeeded"
@@ -238,10 +249,11 @@ def run(root, *, resume=False, new=False, retry_interrupted=False, allow_agent=F
             require(state["status"] in ("running", "waiting", "interrupted"), "This run cannot resume; start --new")
             for node in cfg["nodes"]:
                 record = state["nodes"][node["id"]]
-                if record["status"] == "running":
+                if _unfinished_attempt(record):
                     require(retry_interrupted and node["retryable"],
                             "Interrupted node may have side effects; inspection and --retry-interrupted are required", "RETRY_CONFIRMATION")
                     record["status"] = "pending" if record["attempts"] < node["max_attempts"] else "failed"
+                    record["interrupted_retry"] = record["status"] == "pending"
                     if record["status"] == "failed":
                         record["outputs"] = snapshot(root, node["outputs"], required=False)
                         record["error"] = "interrupted_attempt_limit"
@@ -300,13 +312,16 @@ def run(root, *, resume=False, new=False, retry_interrupted=False, allow_agent=F
                         continue
                     if time.monotonic() >= deadline:
                         record["status"], record["error"] = "failed", "run_time_limit"
-                        record["inputs"] = snapshot(root, node["inputs"], required=False)
-                        record["outputs"] = snapshot(root, node["outputs"], required=False)
-                        record["receipt"] = digest({"node": node["id"], "inputs": record["inputs"],
-                                                    "outputs": record["outputs"], "error": record["error"]})
+                        if not _recorded_execution(record):
+                            record["inputs"] = snapshot(root, node["inputs"], required=False)
+                            record["outputs"] = snapshot(root, node["outputs"], required=False)
+                            record["receipt"] = digest({"node": node["id"], "inputs": record["inputs"],
+                                                        "outputs": record["outputs"], "error": record["error"]})
                         changed = True
                         continue
                     record["status"] = "running"
+                    record["interrupted_retry"] = False
+                    record.pop("receipt", None)
                     record["attempts"] += 1
                     record["inputs"] = snapshot(root, node["inputs"], required=False)
                     record["outputs"] = snapshot(root, node["outputs"], required=False)

@@ -47,4 +47,6 @@ Use a real goal, declared outputs, fixed verifier and reviewed protected files. 
 
 State and attempt histories persist under `.agentkit/state/graph`. Resuming a completed/waiting run checks current configuration and terminal-node input/output hashes, including failed nodes whose results selected a recovery branch. Retained JUnit reports are re-read and checked against their recorded hashes, test identities and outcomes. Approval performs the same checks. Missing or changed evidence is rejected. Interrupted running stages require both a retryable declaration and `resume --retry-interrupted`, after inspecting possible side effects. Work already marked succeeded is not repeated when its inputs and outputs remain current. A new workflow definition needs `run --new`.
 
+A completed failed attempt remains recorded while its next retry is pending. Those saved input/output versions and any JUnit evidence are rechecked too. Stopping between completed attempts can resume from that checked boundary; stopping during an unfinished attempt keeps the explicit inspection/retry requirement, including if another interruption happens before the retry starts.
+
 The workbench is an offline/read-only snapshot backed by Cytoscape.js and accessible text tables. It does not approve a stage or execute a command. Regenerate it to reflect changed state.
