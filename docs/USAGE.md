@@ -25,7 +25,7 @@ An approval is bound to that run, node, configuration, upstream receipts and cur
 `.agentkit/graph.json` defines `protected_inputs`, a total execution-time budget, parallelism, required `success_nodes`, and nodes. Each node declares `id`, `kind`, `needs`, `when`, `inputs`, `outputs`, `retryable` and `max_attempts`.
 
 - `command`: a trusted argv command.
-- `agent`: a worker plus independent verifier. A successful provider call alone is not a successful node.
+- `agent`: a worker plus independent verifier. A successful provider call alone is not a successful node. The worker must create its declared outputs; the verifier may inspect but must not change those outputs. Put build/package generation in a command node, or use a temporary location for verifier byproducts.
 - `approval`: an explicit operator decision; it cannot contain a command or output declaration.
 
 Readiness conditions are `all_succeeded`, `any_failed`, and `always`. Dependencies must first reach terminal states. Ineligible nodes become `skipped`. Completion means every configured `success_node` succeeded; a deliberately handled failure may remain visible in another branch. Choose final success nodes whose dependencies actually express your acceptance contract.
@@ -43,6 +43,6 @@ Use a real goal, declared outputs, fixed verifier and reviewed protected files. 
 
 ## Recovery
 
-State and attempt histories persist under `.agentkit/state/graph`. Resuming a completed/waiting run checks current configuration and completed-node input/output hashes. Interrupted running stages require both a retryable declaration and `resume --retry-interrupted`, after inspecting possible side effects. Work already marked succeeded is not repeated when its inputs and outputs remain current. A new workflow definition needs `run --new`.
+State and attempt histories persist under `.agentkit/state/graph`. Resuming a completed/waiting run checks current configuration and terminal-node input/output hashes, including failed nodes whose results selected a recovery branch. Retained JUnit reports are re-read and checked against their recorded hashes, test identities and outcomes. Approval performs the same checks. Missing or changed evidence is rejected. Interrupted running stages require both a retryable declaration and `resume --retry-interrupted`, after inspecting possible side effects. Work already marked succeeded is not repeated when its inputs and outputs remain current. A new workflow definition needs `run --new`.
 
 The workbench is an offline/read-only snapshot backed by Cytoscape.js and accessible text tables. It does not approve a stage or execute a command. Regenerate it to reflect changed state.

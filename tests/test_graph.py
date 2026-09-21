@@ -6,6 +6,55 @@ from test_core import ProjectCase
 
 
 class GraphWorkflow(ProjectCase):
+    def test_waiting_approval_and_completed_resume_require_retained_junit(self):
+        state = engine.run(self.root)
+        report = self.root / state["nodes"]["implement"]["history"][-1]["result"]["verification"]["junit"]["report_path"]
+        original = report.read_bytes()
+        report.write_bytes(original + b"\n")
+        self.assertCode("STALE_INPUTS", lambda: engine.approve(self.root, state["id"], "accept", "Reviewed the checked result."))
+        report.unlink()
+        self.assertCode("MISSING_FILE", lambda: engine.approve(self.root, state["id"], "accept", "Reviewed the checked result."))
+        report.write_bytes(original)
+        engine.approve(self.root, state["id"], "accept", "Reviewed the checked result.")
+        finished = engine.run(self.root, resume=True)
+        self.assertEqual(finished["status"], "completed")
+        report.unlink()
+        self.assertCode("MISSING_FILE", lambda: engine.run(self.root, resume=True))
+    def test_agent_verifier_cannot_repair_declared_product(self):
+        cfg = engine.configuration(self.root)
+        agent = cfg["nodes"][1]
+        agent["needs"] = []
+        agent["inputs"] = ["project/docs/requirements.md"]
+        agent["worker"] = {"provider":"command", "command":self.command("print('unchanged')"), "goal":"Complete the result"}
+        agent["verifier"] = {"format":"exit", "command":self.command(
+            "import json;from pathlib import Path;p=Path('project/app/result.json');"
+            "d=json.loads(p.read_text());d['complete']=True;p.write_text(json.dumps(d))")}
+        cfg["nodes"], cfg["success_nodes"] = [agent], [agent["id"]]
+        write_json(self.root, engine.CONFIG, cfg)
+        state = engine.run(self.root)
+        self.assertEqual(state["status"], "failed")
+        self.assertIn("STALE_INPUTS", state["nodes"][agent["id"]]["error"])
+    def test_failed_node_input_drift_invalidates_recovery_approval(self):
+        atomic_write(self.root, "decision.txt", b"bad")
+        first = self.n("check", "from pathlib import Path;raise SystemExit(0 if Path('decision.txt').read_text()=='good' else 1)", inputs=["decision.txt"])
+        recovery = self.n("recovery", "from pathlib import Path;Path('recovery.txt').write_text('recovered')", ["check"], "any_failed", outputs=["recovery.txt"])
+        approval = {"id":"accept", "kind":"approval", "needs":["recovery"], "when":"all_succeeded", "inputs":["recovery.txt"], "outputs":[], "retryable":False, "max_attempts":1}
+        self.minimal([first, recovery, approval], ["accept"])
+        state = engine.run(self.root)
+        self.assertEqual(state["status"], "waiting")
+        atomic_write(self.root, "decision.txt", b"good")
+        self.assertCode("STALE_INPUTS", lambda: engine.approve(self.root, state["id"], "accept", "Reviewed the recovery result."))
+    def test_failed_launch_keeps_inputs_for_completed_recovery_validation(self):
+        atomic_write(self.root, "decision.txt", b"original")
+        first = self.n("missing", "", inputs=["decision.txt"])
+        first["command"] = {"argv":["agentkit-no-such-program"]}
+        recovery = self.n("recovery", "print('recovered')", ["missing"], "any_failed")
+        self.minimal([first, recovery], ["recovery"])
+        state = engine.run(self.root)
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(engine.run(self.root, resume=True), state)
+        atomic_write(self.root, "decision.txt", b"changed")
+        self.assertCode("STALE_INPUTS", lambda: engine.run(self.root, resume=True))
     def config(self, function):
         cfg = engine.configuration(self.root)
         function(cfg)

@@ -14,7 +14,8 @@ import time
 import xml.etree.ElementTree as ET
 
 from .core import (KitError, require, object_fields, strings, number, confined,
-                   digest_bytes, redact, read_bytes, relative_name, canonical, decode_json, atomic_write, file_hash)
+                   digest_bytes, redact, read_bytes, relative_name, canonical, decode_json, atomic_write, file_hash,
+                   check_fingerprint)
 
 BASE_ENV = {"PATH", "HOME", "USER", "LOGNAME", "USERNAME", "USERPROFILE", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR",
             "LANG", "LC_ALL", "TERM", "COMSPEC", "PATHEXT", "APPDATA", "LOCALAPPDATA",
@@ -237,6 +238,16 @@ def junit(data):
     return {"cases": sorted(cases, key=lambda x: x["id"]), "counts": counts,
             "assertion_failures": sum(c["status"] == "failure" and c["assertion"] for c in cases),
             "test_ids": sorted([list(x) for x in ids]), "sha256": digest_bytes(data)}
+
+
+def retained_junit(root, record):
+    """Revalidate retained assertion evidence before a saved decision is reused."""
+    require(isinstance(record, dict) and isinstance(record.get("report_path"), str),
+            "Missing retained JUnit evidence", "INVALID_EVIDENCE")
+    parsed = junit(read_bytes(root, record["report_path"]))
+    for key in ("sha256", "test_ids", "counts", "assertion_failures"):
+        check_fingerprint(record.get(key), parsed[key], "retained JUnit " + key)
+    return parsed
 
 
 def verify(root, specification, *, remaining=None, cancel=None):

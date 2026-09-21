@@ -103,6 +103,23 @@ class FileContracts(ProjectCase):
 
 
 class ProcessContracts(ProjectCase):
+    def test_timeout_stops_descendant_work(self):
+        child = ("from pathlib import Path;import os,time\n"
+                 "Path('child-ready.txt').write_text(str(os.getpid()))\n"
+                 "for i in range(600):\n"
+                 " with Path('child-pulse.txt').open('ab') as f:f.write(b'pulse\\n')\n"
+                 " time.sleep(.05)\n")
+        parent = ("import subprocess,sys,time;from pathlib import Path\n"
+                  "subprocess.Popen([sys.executable,'-c'," + repr(child) + "],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+                  "while not Path('child-ready.txt').exists():time.sleep(.01)\n"
+                  "time.sleep(30)\n")
+        result = execute(self.root, self.command(parent, timeout=2))
+        self.assertEqual(result["status"], "timeout")
+        self.assertTrue((self.root / "child-ready.txt").is_file(), "Child must start for this check to be meaningful")
+        pulse = self.root / "child-pulse.txt"
+        before = pulse.read_bytes()
+        time.sleep(.3)
+        self.assertEqual(pulse.read_bytes(), before, "Descendant kept executing after timeout")
     def test_argument_metacharacters_are_not_shell_commands(self):
         marker = "literal; echo injected"
         result = execute(self.root, {"argv": ["{python}", "-c", "import sys; print(sys.argv[1])", marker]})

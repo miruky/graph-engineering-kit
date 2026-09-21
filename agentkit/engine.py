@@ -9,7 +9,7 @@ import threading
 
 from .core import (KitError, require, object_fields, strings, number, identifier, load_json,
                    digest, snapshot, confined, write_json, ProjectLock, state_path, now, check_fingerprint)
-from .runtime import execute, validate_command, verify, worker_result, feedback
+from .runtime import execute, validate_command, verify, worker_result, feedback, retained_junit
 
 CONFIG = ".agentkit/graph.json"
 TERMINAL = {"succeeded", "failed", "skipped"}
@@ -116,9 +116,18 @@ def _validate_saved(root, cfg, state):
     require(set(state["nodes"]) == {n["id"] for n in cfg["nodes"]}, "Workflow state inventory differs", "INVALID_STATE")
     for node in cfg["nodes"]:
         record = state["nodes"][node["id"]]
-        if record["status"] == "succeeded" and node["kind"] != "approval":
-            check_fingerprint(record.get("inputs"), snapshot(root, node["inputs"], required=bool(node["inputs"])), node["id"] + " inputs")
-            check_fingerprint(record.get("outputs"), snapshot(root, node["outputs"], required=bool(node["outputs"])), node["id"] + " outputs")
+        if record["status"] in ("succeeded", "failed") and node["kind"] != "approval":
+            require("inputs" in record and "outputs" in record,
+                    "A terminal node lacks input/output evidence; start a new run", "INVALID_STATE")
+            strict = record["status"] == "succeeded"
+            check_fingerprint(record["inputs"], snapshot(root, node["inputs"], required=strict and bool(node["inputs"])), node["id"] + " inputs")
+            check_fingerprint(record["outputs"], snapshot(root, node["outputs"], required=strict and bool(node["outputs"])), node["id"] + " outputs")
+            if node["kind"] == "agent":
+                verification = record["history"][-1].get("result", {}).get("verification", {}) if record.get("history") else {}
+                if strict:
+                    require(verification.get("ok") is True, "Successful agent lacks verification evidence", "INVALID_STATE")
+                if strict and node["verifier"]["format"] == "junit" or verification.get("junit"):
+                    retained_junit(root, verification.get("junit"))
         elif record["status"] == "succeeded":
             current = _approval_digest(root, cfg, state, node)
             check_fingerprint(record.get("approval", {}).get("digest"), current, node["id"] + " approval inputs")
@@ -155,11 +164,14 @@ def _run_node(root, node, protected, protected_patterns, deadline, cancel, attem
             "Only declared outputs may change. The independent verifier decides success.",
             "protected_inputs": sorted(protected), "outputs": node["outputs"]}, deadline - time.monotonic(), cancel=cancel)
         if result["status"] == "passed":
+            before_verification = snapshot(root, node["outputs"], required=bool(node["outputs"]))
             result["verification"] = verify(root, node["verifier"], remaining=deadline - time.monotonic(), cancel=cancel)
+            check_fingerprint(before_verification, snapshot(root, node["outputs"], required=bool(node["outputs"])),
+                              node["id"] + " product during verifier")
         ok = result["status"] == "passed" and result.get("verification", {}).get("ok") is True
     check_fingerprint(inputs, snapshot(root, node["inputs"], required=bool(node["inputs"])), node["id"] + " read-only inputs")
     check_fingerprint(protected, snapshot(root, protected_patterns), "protected workflow inputs")
-    outputs = snapshot(root, node["outputs"], required=bool(node["outputs"])) if ok else {}
+    outputs = snapshot(root, node["outputs"], required=ok and bool(node["outputs"]))
     return {"ok": ok, "started_at": started, "finished_at": now(), "result": result,
             "inputs": inputs, "outputs": outputs,
             "receipt": digest({"node": node["id"], "inputs": inputs, "outputs": outputs, "ok": ok, "result": result})}
@@ -237,6 +249,8 @@ def run(root, *, resume=False, new=False, retry_interrupted=False, allow_agent=F
                         continue
                     record["status"] = "running"
                     record["attempts"] += 1
+                    record["inputs"] = snapshot(root, node["inputs"], required=False)
+                    record["outputs"] = snapshot(root, node["outputs"], required=False)
                     save()  # Persist the at-least-once boundary before launching side effects.
                     previous = record["history"][-1] if record["history"] else None
                     future = pool.submit(_run_node, root, node, state["protected_inputs"], cfg["protected_inputs"], deadline, cancel,
@@ -256,6 +270,7 @@ def run(root, *, resume=False, new=False, retry_interrupted=False, allow_agent=F
                                 "pending" if node["retryable"] and record["attempts"] < node["max_attempts"] else "failed")
                         except KitError as exc:
                             record["status"], record["error"] = "failed", exc.code + ": " + str(exc)
+                            record["outputs"] = snapshot(root, node["outputs"], required=False)
                         except Exception as exc:
                             record["status"], record["error"] = "failed", "INTERNAL_ERROR: " + type(exc).__name__
                         changed = True
