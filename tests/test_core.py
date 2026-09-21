@@ -125,7 +125,7 @@ class ProcessContracts(ProjectCase):
         result = execute(self.root, self.command("print('start-'+'x'*50000+'-end')"))
         self.assertEqual(result["status"], "passed")
         self.assertLess(len(result["stdout"].encode()), 18000)
-        self.assertEqual(complete_output(self.root, result), 'start-' + 'x'*50000 + '-end\n')
+        self.assertEqual(complete_output(self.root, result), 'start-' + 'x'*50000 + '-end' + os.linesep)
         atomic_write(self.root, result["stdout_artifact"]["path"], b"replaced")
         self.assertCode("INVALID_EVIDENCE", lambda: complete_output(self.root, result))
     def test_provider_protocol_uses_complete_retained_output(self):
