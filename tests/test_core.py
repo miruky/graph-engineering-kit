@@ -118,6 +118,10 @@ class ProcessContracts(ProjectCase):
         with patch.dict(os.environ, {"AGENTKIT_PRIVATE_TEST": "not-forwarded"}):
             result = execute(self.root, self.command("import sys,os; print(sys.stdin.read()); print(os.getenv('AGENTKIT_PRIVATE_TEST','absent'))"), input_text="specific task")
         self.assertEqual(result["stdout"].splitlines(), ["specific task", "absent"])
+    def test_os_identity_variables_needed_by_credential_stores_are_preserved(self):
+        with patch.dict(os.environ, {"USER": "kit-test-user", "LOGNAME": "kit-test-user", "USERNAME": "kit-test-user"}):
+            result = execute(self.root, self.command("import os;print(all(os.getenv(k)=='kit-test-user' for k in ('USER','LOGNAME','USERNAME')))"))
+        self.assertEqual(result["stdout"].strip(), "True")
     def test_cancellation_stops_running_command(self):
         event = threading.Event()
         timer = threading.Timer(.1, event.set)

@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET
 from .core import (KitError, require, object_fields, strings, number, confined,
                    digest_bytes, redact, read_bytes, relative_name, canonical, decode_json)
 
-BASE_ENV = {"PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR",
+BASE_ENV = {"PATH", "HOME", "USER", "LOGNAME", "USERNAME", "USERPROFILE", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR",
             "LANG", "LC_ALL", "TERM", "COMSPEC", "PATHEXT", "APPDATA", "LOCALAPPDATA",
             "XDG_CONFIG_HOME", "CODEX_HOME", "SSL_CERT_FILE", "SSL_CERT_DIR",
             "NODE_EXTRA_CA_CERTS"}
