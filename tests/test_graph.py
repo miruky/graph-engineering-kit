@@ -33,6 +33,14 @@ class GraphWorkflow(ProjectCase):
         engine.approve(self.root, state["id"], "accept", "Reviewed both test outputs.")
         self.config(lambda c: c.update(max_seconds=999))
         self.assertCode("STALE_INPUTS", lambda: engine.run(self.root, resume=True))
+    def test_completed_approval_rechecks_its_additional_inputs(self):
+        atomic_write(self.root, "acceptance-note.txt", b"approved contract")
+        self.config(lambda c: c["nodes"][-1]["inputs"].append("acceptance-note.txt"))
+        state = engine.run(self.root)
+        engine.approve(self.root, state["id"], "accept", "Reviewed both checks and the acceptance note.")
+        self.assertEqual(engine.run(self.root, resume=True)["status"], "completed")
+        atomic_write(self.root, "acceptance-note.txt", b"changed contract")
+        self.assertCode("STALE_INPUTS", lambda: engine.run(self.root, resume=True))
     def test_cycles_and_dangling_dependencies_fail_before_execution(self):
         original = engine.configuration(self.root)
         self.config(lambda c: c["nodes"][0].update(needs=["accept"]))
@@ -78,6 +86,11 @@ class GraphWorkflow(ProjectCase):
     def test_missing_declared_output_does_not_pass(self):
         self.minimal([self.n("one", "print('claimed success')", outputs=["missing.txt"])], ["one"])
         self.assertEqual(engine.run(self.root)["status"], "failed")
+    def test_new_protected_file_during_command_invalidates_node(self):
+        self.minimal([self.n("mutate", "from pathlib import Path;Path('project/docs/new.md').write_text('changed rules')")], ["mutate"])
+        state = engine.run(self.root)
+        self.assertEqual(state["status"], "failed")
+        self.assertIn("STALE_INPUTS", state["nodes"]["mutate"]["error"])
     def test_provider_node_needs_opt_in(self):
         self.config(lambda c: c["nodes"][1]["worker"].update(provider="claude"))
         self.assertCode("AGENT_OPT_IN", lambda: engine.run(self.root))

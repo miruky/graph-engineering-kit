@@ -119,6 +119,10 @@ def _validate_saved(root, cfg, state):
         if record["status"] == "succeeded" and node["kind"] != "approval":
             check_fingerprint(record.get("inputs"), snapshot(root, node["inputs"], required=bool(node["inputs"])), node["id"] + " inputs")
             check_fingerprint(record.get("outputs"), snapshot(root, node["outputs"], required=bool(node["outputs"])), node["id"] + " outputs")
+        elif record["status"] == "succeeded":
+            current = _approval_digest(root, cfg, state, node)
+            check_fingerprint(record.get("approval", {}).get("digest"), current, node["id"] + " approval inputs")
+            check_fingerprint(record.get("receipt"), current, node["id"] + " approval receipt")
 
 
 def approve(root, run_id, node_id, reason):
@@ -138,7 +142,7 @@ def approve(root, run_id, node_id, reason):
     return {"ok": True, "approved": node_id, "run_id": run_id, "request_digest": fingerprint}
 
 
-def _run_node(root, node, protected, deadline, cancel, attempt, previous):
+def _run_node(root, node, protected, protected_patterns, deadline, cancel, attempt, previous):
     inputs = snapshot(root, node["inputs"], required=bool(node["inputs"]))
     started = now()
     if node["kind"] == "command":
@@ -154,7 +158,7 @@ def _run_node(root, node, protected, deadline, cancel, attempt, previous):
             result["verification"] = verify(root, node["verifier"], remaining=deadline - time.monotonic(), cancel=cancel)
         ok = result["status"] == "passed" and result.get("verification", {}).get("ok") is True
     check_fingerprint(inputs, snapshot(root, node["inputs"], required=bool(node["inputs"])), node["id"] + " read-only inputs")
-    check_fingerprint(protected, {p: snapshot(root, [p])[p] for p in protected}, "protected workflow inputs")
+    check_fingerprint(protected, snapshot(root, protected_patterns), "protected workflow inputs")
     outputs = snapshot(root, node["outputs"], required=bool(node["outputs"])) if ok else {}
     return {"ok": ok, "started_at": started, "finished_at": now(), "result": result,
             "inputs": inputs, "outputs": outputs,
@@ -235,7 +239,7 @@ def run(root, *, resume=False, new=False, retry_interrupted=False, allow_agent=F
                     record["attempts"] += 1
                     save()  # Persist the at-least-once boundary before launching side effects.
                     previous = record["history"][-1] if record["history"] else None
-                    future = pool.submit(_run_node, root, node, state["protected_inputs"], deadline, cancel,
+                    future = pool.submit(_run_node, root, node, state["protected_inputs"], cfg["protected_inputs"], deadline, cancel,
                                          record["attempts"], previous)
                     futures[future] = node
                     changed = True

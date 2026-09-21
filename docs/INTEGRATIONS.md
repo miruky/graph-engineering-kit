@@ -17,7 +17,7 @@ These commands print configuration; they do not invoke a model or save credentia
 
 The Claude preset uses restricted file tools (`Read`, `Edit`, `Write`, `Glob`, `Grep`), no shell tools, an empty explicit MCP configuration, and noninteractive refusal of requests that still need permission. Its per-invocation cost limit is `--max-budget-usd 2`; controller attempt limits are separate. Existing authorized Claude login or explicitly passed provider credentials are required. The preset's flags correspond to Claude Code 2.1.278; `--restricted`, `--permission-prompts`, and JSON result support must be available in the installed CLI.
 
-The Codex preset uses `codex exec --ephemeral --sandbox workspace-write --json -`. Its flags correspond to Codex CLI 0.154.0. The selected project must satisfy Codex's own repository/trust requirements. Existing sandbox, execution-policy and approval restrictions still apply. No bypass, unrestricted sandbox or hook-trust bypass flag is used.
+The Codex preset uses `codex exec --ephemeral --sandbox workspace-write --json -`. Its flags correspond to Codex CLI 0.154.0. The selected project must satisfy Codex's own repository/trust requirements. A fresh directory created by `new` is not automatically a Git repository; initialize it with `git init` when appropriate, or use an existing reviewed Git checkout. Existing sandbox, execution-policy and approval restrictions still apply. No bypass, unrestricted sandbox or hook-trust bypass flag is used.
 
 CLI authentication, access plans, quotas and model selection belong to the provider. `doctor` reports executable availability, not authentication. Review customizations in a project before a provider run. Do not run an unfamiliar repository merely because its instructions suggest it.
 

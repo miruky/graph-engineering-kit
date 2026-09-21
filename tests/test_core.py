@@ -8,12 +8,12 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 from agentkit import KIND
 from agentkit.core import (KitError, decode_json, confined, text, atomic_write, load_json, write_json,
     expand, snapshot, ProjectLock, unlock, process_alive, contains_secret, redact, number, digest)
-from agentkit.runtime import execute, verify, junit, validate_command, worker_result
+from agentkit.runtime import execute, verify, junit, validate_command, worker_result, _terminate
 from agentkit.integrations import new_project, install_runtime, provider_command
 
 REPO = Path(__file__).resolve().parents[1]
@@ -112,6 +112,18 @@ class ProcessContracts(ProjectCase):
         result = execute(self.root, self.command("print('x'*100000)", max_output_bytes=1024))
         self.assertEqual(result["status"], "output_limit")
         self.assertLessEqual(len(result["stdout"]), 1024)
+    def test_output_limit_is_shared_between_stdout_and_stderr(self):
+        result = execute(self.root, self.command("import sys;print('x'*900);print('y'*900,file=sys.stderr)", max_output_bytes=1024))
+        self.assertEqual(result["status"], "output_limit")
+        self.assertLessEqual(len(result["stdout"].encode()) + len(result["stderr"].encode()), 1024)
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group contract")
+    def test_exited_group_permission_race_is_not_a_false_failure(self):
+        process = Mock(pid=123, poll=Mock(return_value=0), wait=Mock(return_value=0))
+        with patch("agentkit.runtime.os.killpg", side_effect=PermissionError):
+            _terminate(process)
+        process.poll.return_value = None
+        with patch("agentkit.runtime.os.killpg", side_effect=PermissionError):
+            self.assertCode("PROCESS_CONTROL_FAILED", lambda: _terminate(process))
     def test_missing_executable_is_an_error(self):
         self.assertCode("MISSING_EXECUTABLE", lambda: execute(self.root, {"argv": ["agentkit-executable-that-does-not-exist"]}))
     def test_stdin_and_no_accidental_env_leak(self):

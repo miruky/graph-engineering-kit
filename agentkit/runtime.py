@@ -62,14 +62,22 @@ def argv_for(command, root, values=None):
 def _terminate(process):
     """Stop the process group we own; never use a broad process-name match."""
     if os.name == "posix":
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGTERM)
+        def signal_group(sig):
+            try:
+                os.killpg(process.pid, sig)
+            except ProcessLookupError:
+                pass
+            except PermissionError as exc:
+                # A rapidly exited/reaped leader may no longer have an accessible group
+                # on macOS. Never retry a foreign/inaccessible group by PID or name.
+                if process.poll() is None:
+                    raise KitError("Cannot terminate the owned process group", "PROCESS_CONTROL_FAILED") from exc
+        signal_group(signal.SIGTERM)
         try:
             process.wait(timeout=.5)
         except subprocess.TimeoutExpired:
             pass
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)
+        signal_group(signal.SIGKILL)
     elif process.poll() is None:
         subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False)
@@ -140,7 +148,8 @@ def execute(root, command, *, values=None, input_text=None, remaining=None, extr
                 stdout, stderr = out.read(output_limit + 1), err.read(output_limit + 1)
                 if len(stdout) + len(stderr) > output_limit:
                     reason = reason or "output_limit"
-                stdout, stderr = stdout[:output_limit], stderr[:output_limit]
+                stdout = stdout[:output_limit]
+                stderr = stderr[:max(0, output_limit - len(stdout))]
         finally:
             if process is not None and process.poll() is None:
                 _terminate(process)
