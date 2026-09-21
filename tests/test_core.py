@@ -184,6 +184,7 @@ class EvidenceContracts(ProjectCase):
         second = verify(self.root, specification)
         self.assertTrue(second["ok"])
         self.assertEqual(first["junit"]["test_ids"], second["junit"]["test_ids"])
+        self.assertTrue((self.root / second["junit"]["report_path"]).is_file())
 
 
 class InstallationContracts(ProjectCase):

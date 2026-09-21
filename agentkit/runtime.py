@@ -14,7 +14,7 @@ import time
 import xml.etree.ElementTree as ET
 
 from .core import (KitError, require, object_fields, strings, number, confined,
-                   digest_bytes, redact, read_bytes, relative_name, canonical, decode_json)
+                   digest_bytes, redact, read_bytes, relative_name, canonical, decode_json, atomic_write, file_hash)
 
 BASE_ENV = {"PATH", "HOME", "USER", "LOGNAME", "USERNAME", "USERPROFILE", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR",
             "LANG", "LC_ALL", "TERM", "COMSPEC", "PATHEXT", "APPDATA", "LOCALAPPDATA",
@@ -213,9 +213,36 @@ def verify(root, specification, *, remaining=None, cancel=None):
         if result["status"] in ("timeout", "output_limit", "cancelled"):
             return {**result, "ok": False, "evidence_format": "junit", "evidence_error": result["status"]}
         try:
-            parsed = junit(read_bytes(root, report.relative_to(Path(root).resolve()).as_posix()))
+            observed = read_bytes(root, report.relative_to(Path(root).resolve()).as_posix())
+            original = junit(observed)
+            tree = ET.fromstring(observed)
+            attributes = {"testsuite": {"name", "tests", "failures", "errors", "skipped", "time"},
+                          "testsuites": {"name", "tests", "failures", "errors", "skipped", "time"},
+                          "testcase": {"name", "classname", "time"}, "failure": {"type", "message"},
+                          "error": {"type", "message"}, "skipped": {"message"}}
+            for element in tree.iter():
+                for child in list(element):
+                    if child.tag in ("properties", "system-out", "system-err"):
+                        element.remove(child)
+                element.attrib = {k: redact(v, root) for k, v in element.attrib.items()
+                                  if k in attributes.get(element.tag, set())}
+                if element.text:
+                    element.text = redact(element.text, root)
+                if element.tail:
+                    element.tail = redact(element.tail, root)
+            sanitized = ET.tostring(tree, encoding="utf-8", xml_declaration=True)
+            parsed = junit(sanitized)
+            require(parsed["counts"] == original["counts"] and parsed["assertion_failures"] == original["assertion_failures"],
+                    "Sanitization changed evidence meaning", "INVALID_EVIDENCE")
             require((result["returncode"] == 0) == (parsed["counts"]["failure"] == 0),
                     "Command status contradicts JUnit report", "INVALID_EVIDENCE")
+            retained = ".agentkit/state/results/report-" + parsed["sha256"] + ".xml"
+            if confined(root, retained).exists():
+                require(file_hash(root, retained) == parsed["sha256"], "Retained report was changed", "INVALID_EVIDENCE")
+            else:
+                atomic_write(root, retained, sanitized, exclusive=True)
+            parsed.update({"report_path": retained, "observed_sha256": digest_bytes(observed),
+                           "identity_paths_normalized": parsed["test_ids"] != original["test_ids"]})
             return {**result, "ok": result["returncode"] == 0, "evidence_format": "junit", "junit": parsed}
         except KitError as exc:
             return {**result, "ok": False, "evidence_format": "junit", "evidence_error": str(exc)}
