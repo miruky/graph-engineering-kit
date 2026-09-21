@@ -21,6 +21,12 @@ REPO = Path(__file__).resolve().parents[1]
 
 class ProjectCase(unittest.TestCase):
     def setUp(self):
+        # Git fixtures must not inherit a user's signing, hooks, or worktree settings.
+        isolated = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        isolated.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_COUNT="0", GIT_TERMINAL_PROMPT="0")
+        environment = patch.dict(os.environ, isolated, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
         self.tmp = tempfile.TemporaryDirectory(prefix="kit-test-")
         self.root = Path(self.tmp.name) / "spaces 日本語"
         shutil.copytree(REPO / "examples/project", self.root)
