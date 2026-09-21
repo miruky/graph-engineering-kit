@@ -122,6 +122,7 @@ class ProcessContracts(ProjectCase):
         with patch("agentkit.runtime.os.killpg", side_effect=PermissionError):
             _terminate(process)
         process.poll.return_value = None
+        process.wait.side_effect = subprocess.TimeoutExpired("owned-process", .2)
         with patch("agentkit.runtime.os.killpg", side_effect=PermissionError):
             self.assertCode("PROCESS_CONTROL_FAILED", lambda: _terminate(process))
     def test_missing_executable_is_an_error(self):

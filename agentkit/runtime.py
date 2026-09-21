@@ -70,7 +70,13 @@ def _terminate(process):
             except PermissionError as exc:
                 # A rapidly exited/reaped leader may no longer have an accessible group
                 # on macOS. Never retry a foreign/inaccessible group by PID or name.
-                if process.poll() is None:
+                try:
+                    process.wait(timeout=.2)
+                except subprocess.TimeoutExpired:
+                    # Reap a still-owned direct child where permitted, but do not claim
+                    # successful process-tree control when the group signal was refused.
+                    with contextlib.suppress(OSError):
+                        process.kill()
                     raise KitError("Cannot terminate the owned process group", "PROCESS_CONTROL_FAILED") from exc
         signal_group(signal.SIGTERM)
         try:
