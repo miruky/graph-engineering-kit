@@ -30,6 +30,8 @@ An approval is bound to that run, node, configuration, upstream receipts and cur
 
 Readiness conditions are `all_succeeded`, `any_failed`, and `always`. Dependencies must first reach terminal states. Ineligible nodes become `skipped`. Completion means every configured `success_node` succeeded; a deliberately handled failure may remain visible in another branch. Choose final success nodes whose dependencies actually express your acceptance contract.
 
+Within one node, `inputs` are read-only dependencies; put paths that the stage may modify in `outputs` instead. A downstream stage with a completed execution record may update an earlier stage's file when its output declaration and dependency order permit it. This includes recorded partial outputs from an ordinary failed command. A failed launch or incomplete attempt does not silently become a writer. Saved historical snapshots remain unchanged; freshness checks follow recorded successor versions to the current workspace. An external edit after the last declared writer is still rejected. Approval records retain the specific version reviewed, including when a later approved stage writes a new version. Interrupted partial writes require the documented inspection/retry option before a retryable writer can continue.
+
 This implementation supports a **DAG with bounded per-node retries**. Arbitrary graph cycles and dynamic topology changes are rejected. A finite retry is not permission to replay an irreversible side effect: `retryable` defaults to false in examples. Conflicting declared file access between unordered stages is rejected conservatively; provide an explicit dependency or independent output locations.
 
 ## Provider nodes

@@ -6,6 +6,105 @@ from test_core import ProjectCase
 
 
 class GraphWorkflow(ProjectCase):
+    def test_recorded_partial_write_can_be_handled_without_erasing_failure_history(self):
+        atomic_write(self.root, "decision.txt", b"bad")
+        first = self.n("check", "raise SystemExit(1)", inputs=["decision.txt"])
+        partial = self.n("partial", "from pathlib import Path;Path('decision.txt').write_text('partial');raise SystemExit(1)", ["check"], "any_failed", outputs=["decision.txt"])
+        handled = self.n("handled", "print('partial result retained for inspection')", ["partial"], "any_failed")
+        self.minimal([first, partial, handled], ["handled"])
+        done = engine.run(self.root)
+        self.assertEqual(done["status"], "completed")
+        self.assertEqual(done["nodes"]["partial"]["status"], "failed")
+        self.assertEqual(engine.run(self.root, resume=True), done)
+        atomic_write(self.root, "decision.txt", b"external")
+        self.assertCode("STALE_INPUTS", lambda: engine.run(self.root, resume=True))
+    def test_declared_failed_launch_cannot_authorize_external_input_changes(self):
+        atomic_write(self.root, "decision.txt", b"bad")
+        first = self.n("check", "raise SystemExit(1)", inputs=["decision.txt"])
+        missing = self.n("missing", "", ["check"], "any_failed", outputs=["decision.txt"])
+        missing["command"] = {"argv":["agentkit-no-such-program"]}
+        handled = self.n("handled", "print('launch failure handled')", ["missing"], "any_failed")
+        self.minimal([first, missing, handled], ["handled"])
+        done = engine.run(self.root)
+        self.assertEqual(done["status"], "completed")
+        atomic_write(self.root, "decision.txt", b"external")
+        self.assertCode("STALE_INPUTS", lambda: engine.run(self.root, resume=True))
+    def test_declared_recovery_write_advances_failed_input_version(self):
+        atomic_write(self.root, "decision.txt", b"bad")
+        first = self.n("check", "from pathlib import Path;raise SystemExit(0 if Path('decision.txt').read_text()=='good' else 1)", inputs=["decision.txt"])
+        repair = self.n("repair", "from pathlib import Path;Path('decision.txt').write_text('good')", ["check"], "any_failed", outputs=["decision.txt"])
+        self.minimal([first, repair], ["repair"])
+        done = engine.run(self.root)
+        self.assertEqual(done["status"], "completed")
+        self.assertNotEqual(done["nodes"]["check"]["inputs"], done["nodes"]["repair"]["outputs"])
+        self.assertEqual(engine.run(self.root, resume=True), done)
+        atomic_write(self.root, "decision.txt", b"external edit")
+        self.assertCode("STALE_INPUTS", lambda: engine.run(self.root, resume=True))
+    def test_ordered_successor_versions_use_topology_not_config_list_order(self):
+        atomic_write(self.root, "decision.txt", b"bad")
+        first = self.n("first", "raise SystemExit(1)", inputs=["decision.txt"])
+        second = self.n("second", "from pathlib import Path;Path('decision.txt').write_text('second')", ["first"], "any_failed", outputs=["decision.txt"])
+        third = self.n("third", "from pathlib import Path;Path('decision.txt').write_text('third')", ["second"], outputs=["decision.txt"])
+        self.minimal([third, first, second], ["third"])
+        done = engine.run(self.root)
+        self.assertEqual(done["status"], "completed")
+        self.assertEqual(engine.run(self.root, resume=True), done)
+    def test_successful_later_writer_handles_glob_additions_and_deletions(self):
+        atomic_write(self.root, "data/old.txt", b"old")
+        first = self.n("first", "raise SystemExit(1)", inputs=["data/*.txt"])
+        second = self.n("repair", "from pathlib import Path;Path('data/old.txt').unlink();Path('data/new.txt').write_text('new')", ["first"], "any_failed", outputs=["data/*.txt"])
+        self.minimal([first, second], ["repair"])
+        done = engine.run(self.root)
+        self.assertEqual(done["status"], "completed")
+        self.assertEqual(engine.run(self.root, resume=True), done)
+        atomic_write(self.root, "data/external.txt", b"extra")
+        self.assertCode("STALE_INPUTS", lambda: engine.run(self.root, resume=True))
+    def test_approval_keeps_reviewed_version_before_declared_downstream_write(self):
+        atomic_write(self.root, "decision.txt", b"draft")
+        first = self.n("check", "print('reviewable')", inputs=["decision.txt"])
+        approval = {"id":"accept", "kind":"approval", "needs":["check"], "when":"all_succeeded", "inputs":["decision.txt"], "outputs":[], "retryable":False, "max_attempts":1}
+        apply = self.n("apply", "from pathlib import Path;Path('decision.txt').write_text('applied')", ["accept"], outputs=["decision.txt"])
+        self.minimal([first, approval, apply], ["apply"])
+        waiting = engine.run(self.root)
+        self.assertEqual(waiting["status"], "waiting")
+        reviewed = waiting["nodes"]["accept"]["inputs"]
+        engine.approve(self.root, waiting["id"], "accept", "Reviewed the draft before applying the change.")
+        done = engine.run(self.root, resume=True)
+        self.assertEqual(done["status"], "completed")
+        self.assertEqual(done["nodes"]["accept"]["inputs"], reviewed)
+        self.assertEqual(engine.run(self.root, resume=True), done)
+        atomic_write(self.root, "decision.txt", b"external")
+        self.assertCode("STALE_INPUTS", lambda: engine.run(self.root, resume=True))
+    def test_in_place_recovery_interrupt_requires_inspection_and_rejects_unrelated_drift(self):
+        atomic_write(self.root, "decision.txt", b"bad")
+        atomic_write(self.root, "readonly.txt", b"fixed")
+        first = self.n("check", "raise SystemExit(1)", inputs=["decision.txt", "readonly.txt"])
+        code = ("from pathlib import Path;import time\n"
+                "p=Path('attempt.txt');n=int(p.read_text())+1 if p.exists() else 1;p.write_text(str(n))\n"
+                "Path('decision.txt').write_text('partial' if n==1 else 'fixed')\n"
+                "Path('ready.txt').write_text('ready')\n"
+                "if n==1:time.sleep(15)\n")
+        repair = self.n("repair", code, ["check"], "any_failed", outputs=["decision.txt", "attempt.txt", "ready.txt"], retryable=True, max_attempts=2)
+        self.minimal([first, repair], ["repair"])
+        original_wait = engine.wait
+        def interrupt_when_partial(*args, **kwargs):
+            if (self.root / "ready.txt").exists():
+                raise KeyboardInterrupt
+            return original_wait(*args, **kwargs)
+        with patch("agentkit.engine.wait", side_effect=interrupt_when_partial):
+            with self.assertRaises(KeyboardInterrupt):
+                engine.run(self.root)
+        self.assertCode("RETRY_CONFIRMATION", lambda: engine.run(self.root, resume=True))
+        atomic_write(self.root, "readonly.txt", b"external")
+        self.assertCode("STALE_INPUTS", lambda: engine.run(self.root, resume=True, retry_interrupted=True))
+        atomic_write(self.root, "readonly.txt", b"fixed")
+        done = engine.run(self.root, resume=True, retry_interrupted=True)
+        self.assertEqual(done["status"], "completed")
+        self.assertEqual((self.root / "attempt.txt").read_text(), "2")
+        self.assertEqual(engine.run(self.root, resume=True), done)
+    def test_same_node_readonly_input_and_mutable_output_overlap_is_rejected_early(self):
+        self.minimal([self.n("one", "print('never execute')", inputs=["project/app/result.json"], outputs=["project/app/result.json"])], ["one"])
+        self.assertCode("READ_WRITE_OVERLAP", lambda: engine.run(self.root))
     def test_waiting_approval_and_completed_resume_require_retained_junit(self):
         state = engine.run(self.root)
         report = self.root / state["nodes"]["implement"]["history"][-1]["result"]["verification"]["junit"]["report_path"]

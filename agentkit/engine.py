@@ -8,7 +8,8 @@ import uuid
 import threading
 
 from .core import (KitError, require, object_fields, strings, number, identifier, load_json,
-                   digest, snapshot, confined, write_json, ProjectLock, state_path, now, check_fingerprint)
+                   digest, snapshot, confined, write_json, ProjectLock, state_path, now, check_fingerprint,
+                   _glob_regex)
 from .runtime import execute, validate_command, verify, worker_result, feedback, retained_junit
 
 CONFIG = ".agentkit/graph.json"
@@ -24,6 +25,20 @@ def _overlap(a, b):
     a, b = _prefix(a), _prefix(b)
     return not a or not b or a == b or a.startswith(b + "/") or b.startswith(a + "/") or (
         dynamic and (a.startswith(b) or b.startswith(a)))
+
+
+def _topology(nodes):
+    remaining, order, ancestors = set(nodes), [], {}
+    while remaining:
+        ready = sorted(n for n in remaining if not set(nodes[n]["needs"]) & remaining)
+        require(ready, "Workflow cycles are not supported; use bounded node retries", "CYCLE")
+        for key in ready:
+            ancestors[key] = set(nodes[key]["needs"])
+            for dep in nodes[key]["needs"]:
+                ancestors[key].update(ancestors[dep])
+        remaining.difference_update(ready)
+        order.extend(ready)
+    return order, ancestors
 
 
 def configuration(root):
@@ -47,6 +62,8 @@ def configuration(root):
         strings(node["needs"], "needs")
         strings(node["inputs"], "inputs")
         strings(node["outputs"], "outputs")
+        require(not any(_overlap(a, b) for a in node["inputs"] for b in node["outputs"]),
+                "Inputs are read-only within a node; declare mutable paths only in outputs", "READ_WRITE_OVERLAP")
         require(type(node["retryable"]) is bool, "retryable must be boolean")
         number(node["max_attempts"], "node max_attempts", 1, 20, integer=True)
         require(node["max_attempts"] == 1 or node["retryable"], "Multiple attempts require retryable=true")
@@ -68,16 +85,7 @@ def configuration(root):
                     and node["max_attempts"] == 1, "Approval nodes cannot execute commands or write outputs")
     for node in nodes.values():
         require(set(node["needs"]) <= nodes.keys(), "Dangling workflow dependency", "DANGLING_REFERENCE")
-    remaining, order, ancestors = set(nodes), [], {}
-    while remaining:
-        ready = sorted(n for n in remaining if not set(nodes[n]["needs"]) & remaining)
-        require(ready, "Workflow cycles are not supported; use bounded node retries", "CYCLE")
-        for key in ready:
-            ancestors[key] = set(nodes[key]["needs"])
-            for dep in nodes[key]["needs"]:
-                ancestors[key].update(ancestors[dep])
-        remaining.difference_update(ready)
-        order.extend(ready)
+    order, ancestors = _topology(nodes)
     require(set(cfg["success_nodes"]) <= nodes.keys(), "Unknown success node")
     # Missing dependencies must not accidentally create read/write races between ready stages.
     keys = list(nodes)
@@ -104,24 +112,59 @@ def _save(root, state):
     write_json(root, state_path("graph"), state)
 
 
-def _approval_digest(root, cfg, state, node):
+def _approval_digest(root, cfg, state, node, inputs=None):
     deps = {k: state["nodes"][k].get("receipt") for k in node["needs"]}
     return digest({"run_id": state["id"], "node": node["id"], "configuration": digest(cfg),
-                   "dependencies": deps, "inputs": snapshot(root, node["inputs"], required=bool(node["inputs"]))})
+                   "dependencies": deps, "inputs": inputs if inputs is not None else
+                   snapshot(root, node["inputs"], required=bool(node["inputs"]))})
 
 
-def _validate_saved(root, cfg, state):
+def _validate_saved(root, cfg, state, *, retry_interrupted=False):
     check_fingerprint(state.get("configuration_sha256"), digest(cfg), "workflow configuration")
     check_fingerprint(state.get("protected_inputs"), snapshot(root, cfg["protected_inputs"]), "protected workflow inputs")
     require(set(state["nodes"]) == {n["id"] for n in cfg["nodes"]}, "Workflow state inventory differs", "INVALID_STATE")
+    nodes = {n["id"]: n for n in cfg["nodes"]}
+    order, ancestors = _topology(nodes)
+    output_patterns = {key: [_glob_regex(p) for p in node["outputs"]] for key, node in nodes.items()}
+    for key, record in state["nodes"].items():
+        if record["status"] == "running":
+            require(retry_interrupted and nodes[key]["retryable"],
+                    "Interrupted node may have side effects; inspection and --retry-interrupted are required", "RETRY_CONFIRMATION")
+
+    def current_expected(node, field, saved):
+        """Advance historical file versions through declared, ordered later writes."""
+        selectors = [_glob_regex(p) for p in node[field]]
+        expected = dict(saved)
+        for key in order:
+            if node["id"] not in ancestors[key] or nodes[key]["kind"] == "approval":
+                continue
+            successor = state["nodes"][key]
+            history = successor.get("history", [])
+            recorded_execution = bool(history and successor.get("receipt") == history[-1].get("receipt"))
+            if successor["status"] in ("succeeded", "failed") and recorded_execution:
+                require(isinstance(successor.get("outputs"), dict),
+                        "A terminal writer lacks output evidence; start a new run", "INVALID_STATE")
+                written = successor["outputs"]
+            elif successor["status"] == "running" and retry_interrupted and nodes[key]["retryable"]:
+                # This explicit operator option accepts inspection/retry of partial writes.
+                written = snapshot(root, nodes[key]["outputs"], required=False)
+            else:
+                continue
+            expected = {p: value for p, value in expected.items()
+                        if not any(pattern.fullmatch(p) for pattern in output_patterns[key])}
+            expected.update({p: value for p, value in written.items()
+                             if any(pattern.fullmatch(p) for pattern in selectors)})
+        return expected
+
     for node in cfg["nodes"]:
         record = state["nodes"][node["id"]]
         if record["status"] in ("succeeded", "failed") and node["kind"] != "approval":
-            require("inputs" in record and "outputs" in record,
+            require(isinstance(record.get("inputs"), dict) and isinstance(record.get("outputs"), dict),
                     "A terminal node lacks input/output evidence; start a new run", "INVALID_STATE")
             strict = record["status"] == "succeeded"
-            check_fingerprint(record["inputs"], snapshot(root, node["inputs"], required=strict and bool(node["inputs"])), node["id"] + " inputs")
-            check_fingerprint(record["outputs"], snapshot(root, node["outputs"], required=strict and bool(node["outputs"])), node["id"] + " outputs")
+            for field in ("inputs", "outputs"):
+                check_fingerprint(current_expected(node, field, record[field]),
+                                  snapshot(root, node[field], required=False), node["id"] + " " + field)
             if node["kind"] == "agent":
                 verification = record["history"][-1].get("result", {}).get("verification", {}) if record.get("history") else {}
                 if strict:
@@ -129,9 +172,14 @@ def _validate_saved(root, cfg, state):
                 if strict and node["verifier"]["format"] == "junit" or verification.get("junit"):
                     retained_junit(root, verification.get("junit"))
         elif record["status"] == "succeeded":
-            current = _approval_digest(root, cfg, state, node)
+            reviewed_inputs = record.get("inputs")
+            if reviewed_inputs is None:  # Legacy approvals without a later write remain readable.
+                reviewed_inputs = snapshot(root, node["inputs"], required=bool(node["inputs"]))
+            current = _approval_digest(root, cfg, state, node, reviewed_inputs)
             check_fingerprint(record.get("approval", {}).get("digest"), current, node["id"] + " approval inputs")
             check_fingerprint(record.get("receipt"), current, node["id"] + " approval receipt")
+            check_fingerprint(current_expected(node, "inputs", reviewed_inputs),
+                              snapshot(root, node["inputs"], required=False), node["id"] + " current input versions")
 
 
 def approve(root, run_id, node_id, reason):
@@ -184,7 +232,7 @@ def run(root, *, resume=False, new=False, retry_interrupted=False, allow_agent=F
     with ProjectLock(root, "graph"):
         if resume:
             state = status(root)
-            _validate_saved(root, cfg, state)
+            _validate_saved(root, cfg, state, retry_interrupted=retry_interrupted)
             if state["status"] == "completed":
                 return state
             require(state["status"] in ("running", "waiting", "interrupted"), "This run cannot resume; start --new")
@@ -194,6 +242,11 @@ def run(root, *, resume=False, new=False, retry_interrupted=False, allow_agent=F
                     require(retry_interrupted and node["retryable"],
                             "Interrupted node may have side effects; inspection and --retry-interrupted are required", "RETRY_CONFIRMATION")
                     record["status"] = "pending" if record["attempts"] < node["max_attempts"] else "failed"
+                    if record["status"] == "failed":
+                        record["outputs"] = snapshot(root, node["outputs"], required=False)
+                        record["error"] = "interrupted_attempt_limit"
+                        record["receipt"] = digest({"node": node["id"], "inputs": record["inputs"],
+                                                    "outputs": record["outputs"], "error": record["error"]})
         else:
             path = state_path("graph")
             if confined(root, path).exists():
@@ -232,19 +285,25 @@ def run(root, *, resume=False, new=False, retry_interrupted=False, allow_agent=F
                         changed = True
                         continue
                     if node["kind"] == "approval":
-                        request = _approval_digest(root, cfg, state, node)
+                        approval_inputs = snapshot(root, node["inputs"], required=bool(node["inputs"]))
+                        request = _approval_digest(root, cfg, state, node, approval_inputs)
                         approval = record.get("approval")
                         if approval:
                             check_fingerprint(approval["digest"], request, "operator approval")
                             record["status"], record["receipt"] = "succeeded", request
                         else:
                             record["status"], record["request_digest"] = "waiting", request
+                        record["inputs"] = approval_inputs
                         changed = True
                         continue
                     if len(futures) >= cfg["parallelism"]:
                         continue
                     if time.monotonic() >= deadline:
                         record["status"], record["error"] = "failed", "run_time_limit"
+                        record["inputs"] = snapshot(root, node["inputs"], required=False)
+                        record["outputs"] = snapshot(root, node["outputs"], required=False)
+                        record["receipt"] = digest({"node": node["id"], "inputs": record["inputs"],
+                                                    "outputs": record["outputs"], "error": record["error"]})
                         changed = True
                         continue
                     record["status"] = "running"
@@ -271,13 +330,24 @@ def run(root, *, resume=False, new=False, retry_interrupted=False, allow_agent=F
                         except KitError as exc:
                             record["status"], record["error"] = "failed", exc.code + ": " + str(exc)
                             record["outputs"] = snapshot(root, node["outputs"], required=False)
+                            record["receipt"] = digest({"node": node["id"], "inputs": record["inputs"],
+                                                        "outputs": record["outputs"], "error": record["error"]})
                         except Exception as exc:
                             record["status"], record["error"] = "failed", "INTERNAL_ERROR: " + type(exc).__name__
+                            record["outputs"] = snapshot(root, node["outputs"], required=False)
+                            record["receipt"] = digest({"node": node["id"], "inputs": record["inputs"],
+                                                        "outputs": record["outputs"], "error": record["error"]})
                         changed = True
                 if changed:
                     save()
                 if not futures and not changed:
                     break
+            try:
+                _validate_saved(root, cfg, state)
+            except KitError as exc:
+                state["status"], state["error"] = "failed", exc.code + ": " + str(exc)
+                save()
+                return state
             if any(r["status"] == "waiting" for r in state["nodes"].values()):
                 state["status"] = "waiting"
             elif all(state["nodes"][n]["status"] == "succeeded" for n in cfg["success_nodes"]):

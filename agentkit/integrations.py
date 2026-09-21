@@ -54,7 +54,7 @@ def new_project(source, target):
                 continue
             atomic_write(target, relative, path.read_bytes(), exclusive=True)
     for name in ("kit.py", "dev", "dev.cmd", "dev.ps1", "AGENTS.md", "CLAUDE.md", ".gitignore", ".gitattributes",
-                 "README.md", "README.ja.md", "LICENSE", "THIRD_PARTY_NOTICES.md"):
+                 "README.md", "README.ja.md", "README.en.md", "LICENSE", "THIRD_PARTY_NOTICES.md"):
         atomic_write(target, name, (source / name).read_bytes(), exclusive=True)
     for folder in ("agentkit", "tests", "examples", "docs", "integrations", "schemas"):
         for path in (source / folder).rglob("*"):
@@ -73,7 +73,7 @@ def install_runtime(source, target, kind, apply=False):
     require(not confined(target, base).exists(), "Toolkit already exists; install never overwrites it", "ALREADY_EXISTS")
     files = [p for folder in ("agentkit", "tests", "examples", "docs", "integrations", "schemas")
              for p in (source / folder).rglob("*") if p.is_file() and "__pycache__" not in p.parts]
-    files += [source / n for n in ("kit.py", "README.md", "README.ja.md", "LICENSE", "THIRD_PARTY_NOTICES.md")]
+    files += [source / n for n in ("kit.py", "README.md", "README.ja.md", "README.en.md", "LICENSE", "THIRD_PARTY_NOTICES.md")]
     plan = [f"{base}/{p.relative_to(source).as_posix()}" for p in files]
     template = f".agentkit/{kind}.example.json"
     require(not confined(target, template).exists(), "Example configuration already exists", "ALREADY_EXISTS")

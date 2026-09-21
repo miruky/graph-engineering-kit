@@ -1,36 +1,65 @@
-# Graph Engineering Kit
+# グラフエンジニアリングの導入テンプレート
 
-作業の依存関係、並行処理、確認の合流、承認と再開を管理するツールキットです。
+作業の依存関係を定義し、順番に実行する処理、並行して進める検査、承認待ちを管理します。実行結果を保存し、各処理と成果物の状態をノード図で確認できます。
 
-[English](README.md) · [操作手順](docs/USAGE.md) · [設計と制約](docs/ARCHITECTURE.md) · [Codex・Claude Code](docs/INTEGRATIONS.md)
+[英語版](README.en.md) · [操作手順](docs/USAGE.md) · [設計と制約](docs/ARCHITECTURE.md)
 
-## クローン後の起動
+## クローン後に試す
 
-必要なものはGitと **Python 3.10以上** です。追加パッケージのインストールやAPIキーは、付属の利用例には不要です。Pythonは制御ツールの実行用で、開発するアプリの言語を指定するものではありません。
+必要なものはGitと **Python 3.10以上** です。Pythonはこのツールを動かすために使い、対象アプリの開発言語は限定していません。付属の利用例には、追加パッケージやAPIキーは不要です。
+
+クローンしたディレクトリで実行してください。
 
 ```sh
-# 付属の利用例とツール自体の検査を実行します
-git clone <repository-url> graph-engineering-kit
-cd graph-engineering-kit
+# 実行環境と付属の利用例を確認します
 python3 kit.py doctor
 python3 kit.py demo
-python3 kit.py check
 ```
 
-Windowsでは `py -3 kit.py ...` または `dev.cmd ...`、PowerShellでは `./dev.ps1 ...` を使用できます。macOS・Linuxでは `./dev ...` も使用できます。
+Windowsでは `python3` を `py -3` へ置き換えてください。`dev.cmd` やPowerShellの `./dev.ps1` も使えます。macOS・Linuxでは `./dev` が短い呼び出し方です。
 
-`demo` は一時的なプロジェクトで、成功する経路と拒否すべき経路を実際に実行します。`check` はツール自体の回帰検査です。実際のアプリを任せる際は、そのアプリの仕様・対象ファイル・検証コマンドを設定します。実際の成果物は、設定した検証コマンドの結果で確認してください。
+`demo` は一時的な作業場所で動きます。クローンしたテンプレートの設定や成果物を、確認済みの状態へ変更しません。
 
-## 自分のプロジェクトへの導入
+## 処理の順序を設定する
 
-`python3 kit.py new ../my-workspace` で、すぐ試せる作業場所を空のディレクトリへ作成できます。既存プロジェクトには `python3 kit.py install --target ../existing-project` で追加するファイルを確認し、`--apply` で導入します。既存のAGENTS.md、CLAUDE.md、設定やフックは上書きしません。
+`.agentkit/graph.json` に各処理の入力・出力、依存する処理、再試行の条件を指定します。`inputs` は参照のみのファイル、`outputs` はその処理で変更するファイルです。通常のコマンド、独立した検証を伴うAIの作業、承認待ちを組み合わせられます。Codex・Claude Codeの設定例も付属しています。
 
-検証コマンドは引数の配列で指定します。特定のアプリ言語やテストフレームワークを必須にはしていません。
+```sh
+# 付属の処理を実行し、承認待ちになった状態を確認します
+python3 kit.py run
+python3 kit.py status
+```
 
-## コンテキストとハーネス
+付属例は承認待ちで停止し、`run` が終了コード3を返します。結果を確認して承認し、再開する手順は [操作手順](docs/USAGE.md) に記載しています。
 
-`git push`を禁止する文章も、AIへ渡す指示であるためコンテキストに含まれます。ハーネスは、その指示を利用する実行環境、ツール、権限、検証処理などを提供します。禁止事項の有無だけでは両者を区別できません。
+```sh
+# ノード図と処理結果を、手元のブラウザーで確認します
+python3 kit.py view --serve
+```
 
-同じアカウントで編集できるローカル設定やフックには回避手段があります。権限を強制する必要がある場合は、制限された認証情報や隔離された実行環境も設計します。具体的な対応範囲は [設計と制約](docs/ARCHITECTURE.md) を参照してください。
+この実装は、循環のない有向グラフと、回数を制限した再試行が対象です。実行中に依存関係を変更する機能はありません。承認は対象の実行とファイルの状態に対応し、古い検証記録や外部から変更された成果物をそのまま再利用しないように確認します。
 
-ライセンスはMITです。第三者のコードは [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) を参照してください。
+## 自分のプロジェクトへ導入する
+
+新しく始める場合は、空の作業場所を作成できます。
+
+```sh
+# テンプレートと実行ツールを新しい作業場所へコピーします
+python3 kit.py new ../my-project
+```
+
+既存のプロジェクトへ追加する場合は、追加予定のファイルを確認してから適用します。
+
+```sh
+# 追加内容を確認してから適用します
+python3 kit.py install --target ../existing-project
+python3 kit.py install --target ../existing-project --apply
+```
+
+既存のAGENTS.md、CLAUDE.md、設定、フックは上書きしません。`.agentkit/graph.example.json` のパスやコマンドを実際のプロジェクトへ合わせ、`.agentkit/graph.json` として保存してください。導入先のディレクトリでは `python3 .agentkit/tools/graph/kit.py --root . inspect` で設定を確認できます。
+
+## 設計上の範囲
+
+このテンプレートは手元で使う開発用ツールです。ローカルの設定や記録は、利用者自身が変更できます。実行権限を制限する場合は、認証情報や実行環境側でも制御してください。詳しい対応範囲は [設計と制約](docs/ARCHITECTURE.md) に記載しています。
+
+ツール自体を変更したときの検査は `python3 kit.py check` で実行できます。ライセンスは [MIT](LICENSE) です。第三者のコードの出典は [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) を参照してください。
