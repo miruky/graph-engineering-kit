@@ -1,0 +1,9 @@
+{
+  "Cytoscape.js": {
+    "version": "3.34.3",
+    "url": "https://registry.npmjs.org/cytoscape/-/cytoscape-3.34.3.tgz",
+    "sha512": "yfYGhRcGAntq6YBD583j4n0Eg3jIxvWmZtz/5uz9UYkeIStSlMxuUja+ec5j3iBD8nv1rwaOAYMW09tBdkSeaQ==",
+    "sha256": "5d9e479216ed58a5f1ac639e746fd7d9770c4393f8c355dd133abc90bcc9ff3f",
+    "license": "MIT"
+  }
+}

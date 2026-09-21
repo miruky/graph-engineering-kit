@@ -1,0 +1,9 @@
+.agentkit/state/
+.agentkit/output/
+__pycache__/
+*.py[cod]
+project/build/
+.env
+.env.*
+*.pem
+.DS_Store

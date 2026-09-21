@@ -1,0 +1,32 @@
+{
+  "provider": "claude",
+  "command": {
+    "argv": [
+      "claude",
+      "--restricted",
+      "--strict-mcp-config",
+      "--mcp-config",
+      "{\"mcpServers\":{}}",
+      "-p",
+      "--output-format",
+      "json",
+      "--permission-mode",
+      "acceptEdits",
+      "--permission-prompts",
+      "none",
+      "--tools",
+      "Read,Edit,Write,Glob,Grep",
+      "--allowedTools",
+      "Read,Edit,Write,Glob,Grep",
+      "--max-budget-usd",
+      "2",
+      "--no-session-persistence"
+    ],
+    "timeout": 300,
+    "max_output_bytes": 2097152,
+    "pass_env": [
+      "ANTHROPIC_API_KEY",
+      "CLAUDE_CODE_OAUTH_TOKEN"
+    ]
+  }
+}

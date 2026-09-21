@@ -1,0 +1,140 @@
+{
+  "schema_version": 1,
+  "max_seconds": 120,
+  "parallelism": 2,
+  "protected_inputs": [
+    "project/docs/**",
+    "project/checks/**"
+  ],
+  "success_nodes": [
+    "accept"
+  ],
+  "nodes": [
+    {
+      "id": "prepare",
+      "kind": "command",
+      "needs": [],
+      "when": "all_succeeded",
+      "inputs": [
+        "project/docs/requirements.md"
+      ],
+      "outputs": [
+        "project/build/prepare.json"
+      ],
+      "retryable": false,
+      "max_attempts": 1,
+      "label": "Prepare contract",
+      "command": {
+        "argv": [
+          "{python}",
+          "project/checks/stage.py",
+          "prepare"
+        ]
+      }
+    },
+    {
+      "id": "implement",
+      "kind": "agent",
+      "needs": [
+        "prepare"
+      ],
+      "when": "all_succeeded",
+      "inputs": [
+        "project/docs/requirements.md",
+        "project/build/prepare.json"
+      ],
+      "outputs": [
+        "project/app/result.json"
+      ],
+      "retryable": false,
+      "max_attempts": 1,
+      "label": "Produce work",
+      "worker": {
+        "provider": "command",
+        "command": {
+          "argv": [
+            "{python}",
+            "project/checks/worker.py",
+            "graph"
+          ]
+        },
+        "goal": "Set complete to true in project/app/result.json and preserve its title."
+      },
+      "verifier": {
+        "format": "junit",
+        "command": {
+          "argv": [
+            "{python}",
+            "project/checks/verify.py",
+            "{result}"
+          ],
+          "timeout": 20
+        }
+      }
+    },
+    {
+      "id": "unit",
+      "kind": "command",
+      "needs": [
+        "implement"
+      ],
+      "when": "all_succeeded",
+      "inputs": [
+        "project/app/result.json"
+      ],
+      "outputs": [
+        "project/build/unit.json"
+      ],
+      "retryable": false,
+      "max_attempts": 1,
+      "label": "Functional check",
+      "command": {
+        "argv": [
+          "{python}",
+          "project/checks/stage.py",
+          "unit"
+        ]
+      }
+    },
+    {
+      "id": "review",
+      "kind": "command",
+      "needs": [
+        "implement"
+      ],
+      "when": "all_succeeded",
+      "inputs": [
+        "project/app/result.json"
+      ],
+      "outputs": [
+        "project/build/review.json"
+      ],
+      "retryable": false,
+      "max_attempts": 1,
+      "label": "Contract review",
+      "command": {
+        "argv": [
+          "{python}",
+          "project/checks/stage.py",
+          "review"
+        ]
+      }
+    },
+    {
+      "id": "accept",
+      "kind": "approval",
+      "needs": [
+        "unit",
+        "review"
+      ],
+      "when": "all_succeeded",
+      "inputs": [
+        "project/app/result.json"
+      ],
+      "outputs": [],
+      "retryable": false,
+      "max_attempts": 1,
+      "label": "Operator acceptance"
+    }
+  ]
+}

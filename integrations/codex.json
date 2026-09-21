@@ -1,0 +1,19 @@
+{
+  "provider": "codex",
+  "command": {
+    "argv": [
+      "codex",
+      "exec",
+      "--ephemeral",
+      "--sandbox",
+      "workspace-write",
+      "--json",
+      "-"
+    ],
+    "timeout": 300,
+    "max_output_bytes": 2097152,
+    "pass_env": [
+      "OPENAI_API_KEY"
+    ]
+  }
+}
