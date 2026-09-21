@@ -28,6 +28,16 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Runtime diagnosis
         run: python kit.py doctor
+      - name: POSIX launcher
+        if: runner.os != 'Windows'
+        run: ./dev doctor
+      - name: Windows launchers
+        if: runner.os == 'Windows'
+        run: |
+          ./dev.ps1 doctor
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmd /c dev.cmd doctor
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Regression tests
         run: python kit.py check
       - name: Complete workflow demonstration
