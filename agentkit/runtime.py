@@ -23,6 +23,32 @@ BASE_ENV = {"PATH", "HOME", "USER", "LOGNAME", "USERNAME", "USERPROFILE", "SYSTE
 BYPASS = {"--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust",
           "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions",
           "--ignore-rules", "--yolo"}
+OUTPUT_EXCERPT_BYTES = 16 * 1024
+
+
+def _retained_output(root, value, stream):
+    """Keep readable state small while retaining the complete sanitized process text."""
+    data = value.encode("utf-8")
+    if len(data) <= OUTPUT_EXCERPT_BYTES:
+        return value, None
+    fingerprint = digest_bytes(data)
+    path = f".agentkit/state/outputs/{fingerprint}-{stream}.txt"
+    atomic_write(root, path, data)
+    half = OUTPUT_EXCERPT_BYTES // 2
+    excerpt = (data[:half].decode("utf-8", "ignore") + "\n[Full sanitized output: " + path + "]\n"
+               + data[-half:].decode("utf-8", "ignore"))
+    return excerpt, {"path": path, "sha256": fingerprint, "bytes": len(data)}
+
+
+def complete_output(root, result, stream="stdout"):
+    """Load full retained text only when a protocol parser needs it."""
+    artifact = result.get(stream + "_artifact")
+    if artifact is None:
+        return result.get(stream, "")
+    data = read_bytes(root, artifact["path"], limit=64 * 1024 * 1024)
+    require(len(data) == artifact["bytes"] and digest_bytes(data) == artifact["sha256"],
+            "Retained process output changed", "INVALID_EVIDENCE")
+    return data.decode("utf-8")
 
 
 def validate_command(command, where="command"):
@@ -159,10 +185,12 @@ def execute(root, command, *, values=None, input_text=None, remaining=None, extr
         finally:
             if process is not None and process.poll() is None:
                 _terminate(process)
+    safe_stdout, stdout_artifact = _retained_output(root, redact(stdout.decode("utf-8", "replace"), root, secrets), "stdout")
+    safe_stderr, stderr_artifact = _retained_output(root, redact(stderr.decode("utf-8", "replace"), root, secrets), "stderr")
     return {"status": reason or ("passed" if returncode == 0 else "failed"),
             "returncode": returncode, "elapsed_seconds": round(time.monotonic() - start, 4),
-            "stdout": redact(stdout.decode("utf-8", "replace"), root, secrets),
-            "stderr": redact(stderr.decode("utf-8", "replace"), root, secrets),
+            "stdout": safe_stdout, "stderr": safe_stderr,
+            "stdout_artifact": stdout_artifact, "stderr_artifact": stderr_artifact,
             "stdout_sha256": digest_bytes(stdout), "stderr_sha256": digest_bytes(stderr)}
 
 
@@ -268,14 +296,15 @@ def worker_result(root, specification, request, remaining, cancel=None):
     provider = specification["provider"]
     if result["status"] == "passed" and provider != "command":
         try:
+            protocol_output = complete_output(root, result)
             if provider == "claude":
-                response = decode_json(result["stdout"])
+                response = decode_json(protocol_output)
                 require(isinstance(response, dict) and response.get("type") == "result"
                         and response.get("is_error") is False and response.get("subtype") == "success",
                         "Claude did not report a successful invocation", "PROVIDER_ERROR")
                 result["provider_usage"] = {k: response[k] for k in ("total_cost_usd", "usage", "modelUsage") if k in response}
             else:
-                events = [decode_json(line) for line in result["stdout"].splitlines() if line.strip()]
+                events = [decode_json(line) for line in protocol_output.splitlines() if line.strip()]
                 require(events and all(isinstance(x, dict) for x in events)
                         and any(x.get("type") == "turn.completed" for x in events)
                         and not any(x.get("type") in ("turn.failed", "error") for x in events),

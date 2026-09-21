@@ -13,7 +13,7 @@ from unittest.mock import patch, Mock
 from agentkit import KIND
 from agentkit.core import (KitError, decode_json, confined, text, atomic_write, load_json, write_json,
     expand, snapshot, ProjectLock, unlock, process_alive, contains_secret, redact, number, digest)
-from agentkit.runtime import execute, verify, junit, validate_command, worker_result, _terminate
+from agentkit.runtime import execute, verify, junit, validate_command, worker_result, _terminate, complete_output
 from agentkit.integrations import new_project, install_runtime, provider_command
 
 REPO = Path(__file__).resolve().parents[1]
@@ -66,6 +66,11 @@ class FileContracts(ProjectCase):
         atomic_write(self.root, "new.txt", b"first", exclusive=True)
         self.assertCode("ALREADY_EXISTS", lambda: atomic_write(self.root, "new.txt", b"second", exclusive=True))
         self.assertEqual(text(self.root, "new.txt"), "first")
+    def test_oversized_json_cannot_replace_a_readable_record(self):
+        write_json(self.root, "state.json", {"status": "running"})
+        with patch("agentkit.core.MAX_JSON_BYTES", 64):
+            self.assertCode("SIZE_LIMIT", lambda: write_json(self.root, "state.json", {"large": "x" * 100}))
+        self.assertEqual(load_json(self.root, "state.json"), {"status": "running"})
     def test_bracket_paths_and_unicode_are_literal(self):
         atomic_write(self.root, "routes/[id]/説明.txt", "hello".encode())
         self.assertEqual(expand(self.root, ["routes/[id]/*.txt"]), ["routes/[id]/説明.txt"])
@@ -116,6 +121,30 @@ class ProcessContracts(ProjectCase):
         result = execute(self.root, self.command("import sys;print('x'*900);print('y'*900,file=sys.stderr)", max_output_bytes=1024))
         self.assertEqual(result["status"], "output_limit")
         self.assertLessEqual(len(result["stdout"].encode()) + len(result["stderr"].encode()), 1024)
+    def test_large_output_is_retained_sanitized_without_bloating_state(self):
+        result = execute(self.root, self.command("print('start-'+'x'*50000+'-end')"))
+        self.assertEqual(result["status"], "passed")
+        self.assertLess(len(result["stdout"].encode()), 18000)
+        self.assertEqual(complete_output(self.root, result), 'start-' + 'x'*50000 + '-end\n')
+        atomic_write(self.root, result["stdout_artifact"]["path"], b"replaced")
+        self.assertCode("INVALID_EVIDENCE", lambda: complete_output(self.root, result))
+    def test_provider_protocol_uses_complete_retained_output(self):
+        code = "import json;print(json.dumps(dict(type='result',is_error=False,subtype='success',result='x'*50000)))"
+        result = worker_result(self.root, {"provider":"claude","command":self.command(code)}, {}, 10)
+        self.assertEqual(result["status"], "passed")
+        self.assertIsNotNone(result["stdout_artifact"])
+    def test_codex_failure_hidden_from_excerpt_is_still_rejected(self):
+        code = ("import json;events=[dict(type='item.completed',text='x'*20000),"
+                "dict(type='error',message='middle_failure'),dict(type='item.completed',text='y'*20000),"
+                "dict(type='turn.completed')];print('\\n'.join(json.dumps(e) for e in events))")
+        result = worker_result(self.root, {"provider":"codex","command":self.command(code)}, {}, 10)
+        self.assertEqual(result["status"], "provider_error")
+        self.assertNotIn("middle_failure", result["stdout"])
+        self.assertIn("middle_failure", complete_output(self.root, result))
+    def test_retained_output_does_not_restore_redacted_secrets(self):
+        result = execute(self.root, self.command("print('x'*50000+' sk-'+'z'*36)"))
+        self.assertIsNotNone(result["stdout_artifact"])
+        self.assertNotIn('sk-' + 'z'*36, complete_output(self.root, result))
     @unittest.skipUnless(os.name == "posix", "POSIX process-group contract")
     def test_exited_group_permission_race_is_not_a_false_failure(self):
         process = Mock(pid=123, poll=Mock(return_value=0), wait=Mock(return_value=0))

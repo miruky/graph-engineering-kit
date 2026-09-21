@@ -186,8 +186,9 @@ def atomic_write(root, relative, data: bytes, *, exclusive=False):
 
 
 def write_json(root, relative, value, *, exclusive=False):
-    atomic_write(root, relative, (json.dumps(value, ensure_ascii=False, indent=2,
-                                           allow_nan=False) + "\n").encode(), exclusive=exclusive)
+    data = (json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode()
+    require(len(data) <= MAX_JSON_BYTES, "JSON record exceeds the 8 MiB state/configuration limit", "SIZE_LIMIT")
+    atomic_write(root, relative, data, exclusive=exclusive)
 
 
 def file_hash(root, relative):
