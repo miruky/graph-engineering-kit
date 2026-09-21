@@ -98,7 +98,7 @@ def parser():
 def git_gate(root, event):
     from .runtime import verify
     def git(*args):
-        result = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+        result = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, encoding="utf-8")
         require(result.returncode == 0, "Git check failed: " + " ".join(args), "GIT_GATE")
         return result.stdout.strip()
     cfg = engine.configuration(root)

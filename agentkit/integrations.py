@@ -90,7 +90,7 @@ def install_runtime(source, target, kind, apply=False):
 def install_git_hooks(root, kit_file):
     root, kit_file = Path(root).resolve(), Path(kit_file).resolve()
     def git(*args):
-        result = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=False)
+        result = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, encoding="utf-8", check=False)
         return result
     found = git("rev-parse", "--show-toplevel")
     require(found.returncode == 0 and Path(found.stdout.strip()).resolve() == root, "Select the Git worktree root")
@@ -105,7 +105,7 @@ def install_git_hooks(root, kit_file):
         path = confined(root, base + "/" + event)
         require(not path.exists(), "A generated Git hook already exists", "ALREADY_EXISTS")
     for event in ("pre-commit", "pre-push"):
-        args = [sys.executable, str(kit_file), "--root", str(root), "git-gate", "--event", event]
+        args = [Path(sys.executable).as_posix(), kit_file.as_posix(), "--root", root.as_posix(), "git-gate", "--event", event]
         content = "#!/bin/sh\nexec " + shlex.join(args) + "\n"
         atomic_write(root, base + "/" + event, content.encode(), exclusive=True)
         confined(root, base + "/" + event).chmod(0o755)
